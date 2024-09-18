@@ -24,32 +24,20 @@ export class OpenaiService {
   private readonly logger = new Logger('OpenaiService');
 
   private async sendMessageToBot(instance: any, openaiBot: OpenaiBot, remoteJid: string, content: string) {
-    const systemMessages: any = openaiBot.systemMessages;
+    const systemMessages = openaiBot.systemMessages.map((message) => ({
+      role: 'system',
+      content: message,
+    }));
 
-    const messagesSystem: any[] = systemMessages.map((message) => {
-      return {
-        role: 'system',
-        content: message,
-      };
-    });
+    const assistantMessages = openaiBot.assistantMessages.map((message) => ({
+      role: 'assistant',
+      content: message,
+    }));
 
-    const assistantMessages: any = openaiBot.assistantMessages;
-
-    const messagesAssistant: any[] = assistantMessages.map((message) => {
-      return {
-        role: 'assistant',
-        content: message,
-      };
-    });
-
-    const userMessages: any = openaiBot.userMessages;
-
-    const messagesUser: any[] = userMessages.map((message) => {
-      return {
-        role: 'user',
-        content: message,
-      };
-    });
+    const userMessages = openaiBot.userMessages.map((message) => ({
+      role: 'user',
+      content: message,
+    }));
 
     const messageData: any = {
       role: 'user',
@@ -58,8 +46,7 @@ export class OpenaiService {
 
     if (this.isImageMessage(content)) {
       const contentSplit = content.split('|');
-
-      const url = contentSplit[1].split('?')[0];
+      const url = contentSplit[1];
 
       messageData.content = [
         { type: 'text', text: contentSplit[2] || content },
@@ -72,7 +59,7 @@ export class OpenaiService {
       ];
     }
 
-    const messages: any[] = [...messagesSystem, ...messagesAssistant, ...messagesUser, messageData];
+    const messages = [...systemMessages, ...assistantMessages, ...userMessages, messageData];
 
     if (instance.integration === Integration.WHATSAPP_BAILEYS) {
       await instance.client.presenceSubscribe(remoteJid);
@@ -109,8 +96,7 @@ export class OpenaiService {
 
     if (this.isImageMessage(content)) {
       const contentSplit = content.split('|');
-
-      const url = contentSplit[1].split('?')[0];
+      const url = contentSplit[1];
 
       messageData.content = [
         { type: 'text', text: contentSplit[2] || content },
@@ -132,6 +118,7 @@ export class OpenaiService {
 
     const runAssistant = await this.client.beta.threads.runs.create(threadId, {
       assistant_id: openaiBot.assistantId,
+      additional_instructions: `O nome do usuário é ${pushName}, o identificador é ${remoteJid}.`,
     });
 
     if (instance.integration === Integration.WHATSAPP_BAILEYS) {
@@ -156,49 +143,71 @@ export class OpenaiService {
     settings: OpenaiSetting,
     message: string,
   ) {
-    const regex = /!?\[(.*?)\]\((.*?)\)/g;
+    // Divide a mensagem em segmentos onde ocorre '---'
+    const segments = message.split('---');
 
-    const result = [];
-    let lastIndex = 0;
+    for (const segment of segments) {
+      const regex = /!?\[(.*?)\]\((.*?)\)/g;
+      const result = [];
+      let lastIndex = 0;
+      let match;
 
-    let match;
-    while ((match = regex.exec(message)) !== null) {
-      if (match.index > lastIndex) {
-        result.push({ text: message.slice(lastIndex, match.index).trim() });
+      while ((match = regex.exec(segment)) !== null) {
+        if (match.index > lastIndex) {
+          result.push({ text: segment.slice(lastIndex, match.index).trim() });
+        }
+
+        const url = match[2];
+        let isImage = false;
+
+        try {
+          const urlObj = new URL(url);
+          const pathname = urlObj.pathname;
+          const imageExtensions = /\.(jpg|jpeg|png|gif|webp)(\?|\/|$)/i;
+          isImage = imageExtensions.test(pathname);
+        } catch (error) {
+          // URL inválida ou erro na análise
+          isImage = false;
+        }
+
+        if (isImage) {
+          result.push({ caption: match[1], url: url });
+        } else {
+          result.push({ text: `${match[1]}: ${url}` });
+        }
+
+        lastIndex = regex.lastIndex;
       }
 
-      result.push({ caption: match[1], url: match[2] });
-
-      lastIndex = regex.lastIndex;
-    }
-
-    if (lastIndex < message.length) {
-      result.push({ text: message.slice(lastIndex).trim() });
-    }
-
-    for (const item of result) {
-      if (item.text) {
-        await instance.textMessage(
-          {
-            number: remoteJid.split('@')[0],
-            delay: settings?.delayMessage || 1000,
-            text: item.text,
-          },
-          false,
-        );
+      if (lastIndex < segment.length) {
+        result.push({ text: segment.slice(lastIndex).trim() });
       }
 
-      if (item.url) {
-        await instance.mediaMessage(
-          {
-            number: remoteJid.split('@')[0],
-            delay: settings?.delayMessage || 1000,
-            mediatype: 'image',
-            media: item.url,
-            caption: item.caption,
-          },
-          false,
-        );
+      // Envia as mensagens ou imagens para este segmento
+      for (const item of result) {
+        if (item.text) {
+          await instance.textMessage(
+            {
+              number: remoteJid.split('@')[0],
+              delay: settings?.delayMessage || 1000,
+              text: item.text,
+            },
+            false,
+          );
+        }
+
+        if (item.url) {
+          await instance.mediaMessage(
+            {
+              number: remoteJid.split('@')[0],
+              delay: settings?.delayMessage || 1000,
+              mediatype: 'image',
+              media: item.url,
+              caption: item.caption,
+            },
+            false,
+          );
+        }
       }
     }
 
@@ -388,14 +397,27 @@ export class OpenaiService {
       return;
     }
 
+    // Verifica se a mensagem é de um grupo
+    if (remoteJid.endsWith('@g.us')) {
+      const normalizedContent = content.toLowerCase();
+      const instanceName = instance.instanceName.toLowerCase();
+
+      // Verifica se o nome da instância está na mensagem
+      if (!normalizedContent.includes(instanceName)) {
+        return; // Não responde se o nome da instância não estiver na mensagem
+      }
+
+      // Adiciona marcação se a mensagem contiver @ e o número do bot
+      const botNumber = instance.phoneNumber.replace('@s.whatsapp.net', '');
+      if (normalizedContent.includes(`@${botNumber}`)) {
+        content = content.replace(`@${botNumber}`, `@${instanceName}`); // Marca o bot na mensagem
+      }
+    }
+
     if (session && settings.expire && settings.expire > 0) {
       const now = Date.now();
-
       const sessionUpdatedAt = new Date(session.updatedAt).getTime();
-
-      const diff = now - sessionUpdatedAt;
-
-      const diffInMinutes = Math.floor(diff / 1000 / 60);
+      const diffInMinutes = Math.floor((now - sessionUpdatedAt) / 1000 / 60);
 
       if (diffInMinutes > settings.expire) {
         if (settings.keepOpen) {
@@ -435,7 +457,7 @@ export class OpenaiService {
       return;
     }
 
-    if (session.status !== 'paused')
+    if (session.status !== 'paused') {
       await this.prismaRepository.integrationSession.update({
         where: {
           id: session.id,
@@ -445,6 +467,7 @@ export class OpenaiService {
           awaitUser: false,
         },
       });
+    }
 
     if (!content) {
       if (settings.unknownMessage) {
@@ -563,7 +586,6 @@ export class OpenaiService {
     });
 
     session = data.session;
-
     const creds = data.creds;
 
     this.client = new OpenAI({
@@ -592,12 +614,8 @@ export class OpenaiService {
 
     if (session && settings.expire && settings.expire > 0) {
       const now = Date.now();
-
       const sessionUpdatedAt = new Date(session.updatedAt).getTime();
-
-      const diff = now - sessionUpdatedAt;
-
-      const diffInMinutes = Math.floor(diff / 1000 / 60);
+      const diffInMinutes = Math.floor((now - sessionUpdatedAt) / 1000 / 60);
 
       if (diffInMinutes > settings.expire) {
         if (settings.keepOpen) {
