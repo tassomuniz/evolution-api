@@ -51,9 +51,15 @@ export class OpenaiService {
       };
     });
 
+    const messageData: any = {
+      role: 'user',
+      content: [{ type: 'text', text: content }],
+    };
+
     if (this.isImageMessage(content)) {
       const contentSplit = content.split('|');
-      const url = contentSplit[1];
+
+      const url = contentSplit[1].split('?')[0];
 
       messageData.content = [
         { type: 'text', text: contentSplit[2] || content },
@@ -103,6 +109,7 @@ export class OpenaiService {
 
     if (this.isImageMessage(content)) {
       const contentSplit = content.split('|');
+
       const url = contentSplit[1];
 
       messageData.content = [
@@ -150,11 +157,12 @@ export class OpenaiService {
     settings: OpenaiSetting,
     message: string,
   ) {
-    // Divide a mensagem em segmentos onde ocorre '---'
+    // Split the message into segments wherever '---' occurs
     const segments = message.split('---');
 
     for (const segment of segments) {
       const regex = /!?\[(.*?)\]\((.*?)\)/g;
+      const imageExtensions = /\.(jpg|jpeg|png|gif|webp)$/i; // Valid image extensions
       const result = [];
       let lastIndex = 0;
       let match;
@@ -165,21 +173,12 @@ export class OpenaiService {
         }
 
         const url = match[2];
-        let isImage = false;
 
-        try {
-          const urlObj = new URL(url);
-          const pathname = urlObj.pathname;
-          const imageExtensions = /\.(jpg|jpeg|png|gif|webp)(\?|\/|$)/i;
-          isImage = imageExtensions.test(pathname);
-        } catch (error) {
-          // URL inválida ou erro na análise
-          isImage = false;
-        }
-
-        if (isImage) {
+        // If the URL is a valid image, add as image; otherwise, treat as text
+        if (imageExtensions.test(url)) {
           result.push({ caption: match[1], url: url });
         } else {
+          // If not an image, add the link as text
           result.push({ text: `${match[1]}: ${url}` });
         }
 
@@ -190,7 +189,7 @@ export class OpenaiService {
         result.push({ text: segment.slice(lastIndex).trim() });
       }
 
-      // Envia as mensagens ou imagens para este segmento
+      // Send the messages or images for this segment
       for (const item of result) {
         if (item.text) {
           await instance.textMessage(
@@ -217,7 +216,6 @@ export class OpenaiService {
         }
       }
     }
-
     await this.prismaRepository.integrationSession.update({
       where: {
         id: session.id,
@@ -415,7 +413,7 @@ export class OpenaiService {
       }
 
       // Adiciona marcação se a mensagem contiver @ e o número do bot
-      const botNumber = instance.phoneNumber.replace('@s.whatsapp.net', '');
+      const botNumber = '5521969723637'; // Substitua pelo número do bot
       if (normalizedContent.includes(`@${botNumber}`)) {
         content = content.replace(`@${botNumber}`, `@${instanceName}`); // Marca o bot na mensagem
       }
@@ -423,8 +421,12 @@ export class OpenaiService {
 
     if (session && settings.expire && settings.expire > 0) {
       const now = Date.now();
+
       const sessionUpdatedAt = new Date(session.updatedAt).getTime();
-      const diffInMinutes = Math.floor((now - sessionUpdatedAt) / 1000 / 60);
+
+      const diff = now - sessionUpdatedAt;
+
+      const diffInMinutes = Math.floor(diff / 1000 / 60);
 
       if (diffInMinutes > settings.expire) {
         if (settings.keepOpen) {
@@ -464,7 +466,7 @@ export class OpenaiService {
       return;
     }
 
-    if (session.status !== 'paused') {
+    if (session.status !== 'paused')
       await this.prismaRepository.integrationSession.update({
         where: {
           id: session.id,
@@ -474,7 +476,6 @@ export class OpenaiService {
           awaitUser: false,
         },
       });
-    }
 
     if (!content) {
       if (settings.unknownMessage) {
@@ -593,6 +594,7 @@ export class OpenaiService {
     });
 
     session = data.session;
+
     const creds = data.creds;
 
     this.client = new OpenAI({
@@ -621,8 +623,12 @@ export class OpenaiService {
 
     if (session && settings.expire && settings.expire > 0) {
       const now = Date.now();
+
       const sessionUpdatedAt = new Date(session.updatedAt).getTime();
-      const diffInMinutes = Math.floor((now - sessionUpdatedAt) / 1000 / 60);
+
+      const diff = now - sessionUpdatedAt;
+
+      const diffInMinutes = Math.floor(diff / 1000 / 60);
 
       if (diffInMinutes > settings.expire) {
         if (settings.keepOpen) {
@@ -738,15 +744,15 @@ export class OpenaiService {
       );
     }
 
-    const lang = this.configService.get<Language>('LANGUAGE').includes('pt')
+    /*     const lang = this.configService.get<Language>('LANGUAGE').includes('pt')
       ? 'pt'
-      : this.configService.get<Language>('LANGUAGE');
+      : this.configService.get<Language>('LANGUAGE'); */
 
     const formData = new FormData();
 
     formData.append('file', audio, 'audio.ogg');
     formData.append('model', 'whisper-1');
-    formData.append('language', lang);
+    formData.append('language', 'pt');
 
     const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
       headers: {
