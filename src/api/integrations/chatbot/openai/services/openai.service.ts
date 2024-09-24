@@ -24,32 +24,25 @@ export class OpenaiService {
   private readonly logger = new Logger('OpenaiService');
 
   private async sendMessageToBot(instance: any, openaiBot: OpenaiBot, remoteJid: string, content: string) {
-    const systemMessages: any = openaiBot.systemMessages;
+    const systemMessages = openaiBot.systemMessages.map((message) => ({
+      role: 'system',
+      content: message,
+    }));
 
-    const messagesSystem: any[] = systemMessages.map((message) => {
-      return {
-        role: 'system',
-        content: message,
-      };
-    });
+    const assistantMessages = openaiBot.assistantMessages.map((message) => ({
+      role: 'assistant',
+      content: message,
+    }));
 
-    const assistantMessages: any = openaiBot.assistantMessages;
+    const userMessages = openaiBot.userMessages.map((message) => ({
+      role: 'user',
+      content: message,
+    }));
 
-    const messagesAssistant: any[] = assistantMessages.map((message) => {
-      return {
-        role: 'assistant',
-        content: message,
-      };
-    });
-
-    const userMessages: any = openaiBot.userMessages;
-
-    const messagesUser: any[] = userMessages.map((message) => {
-      return {
-        role: 'user',
-        content: message,
-      };
-    });
+    const messageData: any = {
+      role: 'user',
+      content: [{ type: 'text', text: content }],
+    };
 
     if (this.isImageMessage(content)) {
       const contentSplit = content.split('|');
@@ -66,7 +59,7 @@ export class OpenaiService {
       ];
     }
 
-    const messages: any[] = [...messagesSystem, ...messagesAssistant, ...messagesUser, messageData];
+    const messages = [...systemMessages, ...assistantMessages, ...userMessages, messageData];
 
     if (instance.integration === Integration.WHATSAPP_BAILEYS) {
       await instance.client.presenceSubscribe(remoteJid);
