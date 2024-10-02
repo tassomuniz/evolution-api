@@ -133,8 +133,9 @@ export class OpenaiService {
 
     const runAssistant = await this.client.beta.threads.runs.create(threadId, {
       assistant_id: openaiBot.assistantId,
+      additional_instructions: `Usuário: ${pushName}, WhatsApp: ${remoteJid}`, // Instruções adicionais aqui
     });
-
+    
     if (instance.integration === Integration.WHATSAPP_BAILEYS) {
       await instance.client.presenceSubscribe(remoteJid);
       await instance.client.sendPresenceUpdate('composing', remoteJid);
