@@ -130,6 +130,7 @@ export default async function useMultiFileAuthStatePrisma(
   }
 
   let creds = await readData('creds');
+  this.logger.info(['creds', creds]);
   if (!creds) {
     creds = initAuthCreds();
     await writeData(creds, 'creds');
