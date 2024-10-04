@@ -1,3 +1,27 @@
+# 2.1.2 (develop)
+
+### Features
+
+* Sync lost messages on chatwoot
+* Set the maximum number of listeners that can be registered for events
+
+### Fixed
+
+* Fetch status message
+* Adjusts in migrations
+* Update pushName in chatwoot
+* Validate message before sending chatwoot
+* Adds the message status to the return of the "prepareMessage" function
+* Fixed openai setting when send a message with chatwoot
+* Fix buildkey function in hSet and hDelete
+* Fix mexico number
+* Update baileys version
+* Update in Baileys version that fixes timeout when updating profile picture
+* Adjusts for fix timeout error on send status message
+* Chatwoot verbose logs
+* Adjusts on prisma connections
+* License terms updated
+
 # 2.1.1 (2024-09-22 10:31)
 
 ### Features

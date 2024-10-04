@@ -1074,7 +1074,7 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          if (this.configService.get<Openai>('OPENAI').ENABLED) {
+          if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
             const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
               where: {
                 instanceId: this.instanceId,
@@ -1084,12 +1084,7 @@ export class BaileysStartupService extends ChannelStartupService {
               },
             });
 
-            if (
-              openAiDefaultSettings &&
-              openAiDefaultSettings.openaiCredsId &&
-              openAiDefaultSettings.speechToText &&
-              received?.message?.audioMessage
-            ) {
+            if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
               messageRaw.message.speechToText = await this.openaiService.speechToText(
                 openAiDefaultSettings.OpenaiCreds,
                 received,
@@ -1180,7 +1175,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const contactRaw: { remoteJid: string; pushName: string; profilePicUrl?: string; instanceId: string } = {
             remoteJid: received.key.remoteJid,
-            pushName: received.pushName,
+            pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
             profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
             instanceId: this.instanceId,
           };
@@ -1190,13 +1185,6 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (contact) {
-            const contactRaw: { remoteJid: string; pushName: string; profilePicUrl?: string; instanceId: string } = {
-              remoteJid: received.key.remoteJid,
-              pushName: contact.pushName,
-              profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
-              instanceId: this.instanceId,
-            };
-
             this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
 
             if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
@@ -1207,10 +1195,11 @@ export class BaileysStartupService extends ChannelStartupService {
               );
             }
 
-            this.prismaRepository.contact.updateMany({
-              where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-              data: contactRaw,
-            });
+            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
+              await this.prismaRepository.contact.create({
+                data: contactRaw,
+              });
+
             return;
           }
 
@@ -1753,9 +1742,25 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (sender === 'status@broadcast') {
-      const jidList = message['status'].option.statusJidList;
+      let jidList;
+      if (message['status'].option.allContacts) {
+        const contacts = await this.prismaRepository.contact.findMany({
+          where: {
+            instanceId: this.instanceId,
+            remoteJid: {
+              not: {
+                endsWith: '@g.us',
+              },
+            },
+          },
+        });
 
-      const batchSize = 500;
+        jidList = contacts.map((contact) => contact.remoteJid);
+      } else {
+        jidList = message['status'].option.statusJidList;
+      }
+
+      const batchSize = 10;
 
       const batches = Array.from({ length: Math.ceil(jidList.length / batchSize) }, (_, i) =>
         jidList.slice(i * batchSize, i * batchSize + batchSize),
@@ -1952,7 +1957,7 @@ export class BaileysStartupService extends ChannelStartupService {
         );
       }
 
-      if (this.configService.get<Openai>('OPENAI').ENABLED) {
+      if (this.configService.get<Openai>('OPENAI').ENABLED && messageRaw?.message?.audioMessage) {
         const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
           where: {
             instanceId: this.instanceId,
@@ -1962,12 +1967,7 @@ export class BaileysStartupService extends ChannelStartupService {
           },
         });
 
-        if (
-          openAiDefaultSettings &&
-          openAiDefaultSettings.openaiCredsId &&
-          openAiDefaultSettings.speechToText &&
-          messageRaw?.message?.audioMessage
-        ) {
+        if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
           messageRaw.message.speechToText = await this.openaiService.speechToText(
             openAiDefaultSettings.OpenaiCreds,
             messageRaw,
@@ -2751,7 +2751,7 @@ export class BaileysStartupService extends ChannelStartupService {
         if (!numberVerified && (user.number.startsWith('52') || user.number.startsWith('54'))) {
           let prefix = '';
           if (user.number.startsWith('52')) {
-            prefix = '1';
+            prefix = '';
           }
           if (user.number.startsWith('54')) {
             prefix = '9';
