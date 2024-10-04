@@ -133,7 +133,11 @@ export class OpenaiService {
 
     const runAssistant = await this.client.beta.threads.runs.create(threadId, {
       assistant_id: openaiBot.assistantId,
-      additional_instructions: `Usuário: ${pushName}, WhatsApp: ${remoteJid}`, // Instruções adicionais aqui
+      additional_instructions: `Informações do usuário:
+      - Nome: ${pushName}
+      - WhatsApp: ${remoteJid}
+      
+      Por favor, use essas informações para personalizar suas respostas.`,
     });
     
     if (instance.integration === Integration.WHATSAPP_BAILEYS) {
@@ -256,6 +260,8 @@ export class OpenaiService {
         awaitUser: true,
       },
     });
+    this.logger.debug(textBuffer);
+    this.logger.debug(message);
   }
 
   public async createAssistantNewSession(instance: InstanceDto, data: any) {
