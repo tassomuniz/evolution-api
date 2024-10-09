@@ -7,6 +7,7 @@ import { ChannelStartupService } from '@api/services/channel.service';
 import { Events, wa } from '@api/types/wa.types';
 import { Chatwoot, ConfigService, Openai } from '@config/env.config';
 import { BadRequestException, InternalServerErrorException } from '@exceptions';
+import { status } from '@utils/renderStatus';
 import { isURL } from 'class-validator';
 import EventEmitter2 from 'eventemitter2';
 import mime from 'mime';
@@ -164,7 +165,7 @@ export class EvolutionStartupService extends ChannelStartupService {
 
         await this.updateContact({
           remoteJid: messageRaw.key.remoteJid,
-          pushName:  messageRaw.key.fromMe ? '' : (messageRaw.key.fromMe == null ? '' : received.pushName),
+          pushName: messageRaw.key.fromMe ? '' : messageRaw.key.fromMe == null ? '' : received.pushName,
           profilePicUrl: received.profilePicUrl,
         });
       }
@@ -273,72 +274,59 @@ export class EvolutionStartupService extends ChannelStartupService {
 
       const messageId = v4();
 
-      let messageRaw: any;
+      let messageRaw: any = {
+        key: { fromMe: true, id: messageId, remoteJid: number },
+        messageTimestamp: Math.round(new Date().getTime() / 1000),
+        webhookUrl,
+        source: 'unknown',
+        instanceId: this.instanceId,
+        status: status[1],
+      };
 
       if (message?.mediaType === 'image') {
         messageRaw = {
-          key: { fromMe: true, id: messageId, remoteJid: number },
+          ...messageRaw,
           message: {
             mediaUrl: message.media,
             quoted,
           },
           messageType: 'imageMessage',
-          messageTimestamp: Math.round(new Date().getTime() / 1000),
-          webhookUrl,
-          source: 'unknown',
-          instanceId: this.instanceId,
         };
       } else if (message?.mediaType === 'video') {
         messageRaw = {
-          key: { fromMe: true, id: messageId, remoteJid: number },
+          ...messageRaw,
           message: {
             mediaUrl: message.media,
             quoted,
           },
           messageType: 'videoMessage',
-          messageTimestamp: Math.round(new Date().getTime() / 1000),
-          webhookUrl,
-          source: 'unknown',
-          instanceId: this.instanceId,
         };
       } else if (message?.mediaType === 'audio') {
         messageRaw = {
-          key: { fromMe: true, id: messageId, remoteJid: number },
+          ...messageRaw,
           message: {
             mediaUrl: message.media,
             quoted,
           },
           messageType: 'audioMessage',
-          messageTimestamp: Math.round(new Date().getTime() / 1000),
-          webhookUrl,
-          source: 'unknown',
-          instanceId: this.instanceId,
         };
       } else if (message?.mediaType === 'document') {
         messageRaw = {
-          key: { fromMe: true, id: messageId, remoteJid: number },
+          ...messageRaw,
           message: {
             mediaUrl: message.media,
             quoted,
           },
           messageType: 'documentMessage',
-          messageTimestamp: Math.round(new Date().getTime() / 1000),
-          webhookUrl,
-          source: 'unknown',
-          instanceId: this.instanceId,
         };
       } else {
         messageRaw = {
-          key: { fromMe: true, id: messageId, remoteJid: number },
+          ...messageRaw,
           message: {
             ...message,
             quoted,
           },
           messageType: 'conversation',
-          messageTimestamp: Math.round(new Date().getTime() / 1000),
-          webhookUrl,
-          source: 'unknown',
-          instanceId: this.instanceId,
         };
       }
 
@@ -433,11 +421,14 @@ export class EvolutionStartupService extends ChannelStartupService {
     }
   }
 
-  public async mediaMessage(data: SendMediaDto, isIntegration = false) {
-    const message = await this.prepareMediaMessage(data);
+  public async mediaMessage(data: SendMediaDto, file?: any, isIntegration = false) {
+    const mediaData: SendMediaDto = { ...data };
 
-    console.log('message', message);
-    return await this.sendMessageWithTyping(
+    if (file) mediaData.media = file.buffer.toString('base64');
+
+    const message = await this.prepareMediaMessage(mediaData);
+
+    const mediaSent = await this.sendMessageWithTyping(
       data.number,
       { ...message },
       {
@@ -450,6 +441,8 @@ export class EvolutionStartupService extends ChannelStartupService {
       },
       isIntegration,
     );
+
+    return mediaSent;
   }
 
   public async processAudio(audio: string, number: string) {
@@ -475,10 +468,19 @@ export class EvolutionStartupService extends ChannelStartupService {
     return prepareMedia;
   }
 
-  public async audioWhatsapp(data: SendAudioDto, isIntegration = false) {
-    const message = await this.processAudio(data.audio, data.number);
+  public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
+    const mediaData: SendAudioDto = { ...data };
 
-    return await this.sendMessageWithTyping(
+    if (file?.buffer) {
+      mediaData.audio = file.buffer.toString('base64');
+    } else {
+      console.error('El archivo o buffer no est� definido correctamente.');
+      throw new Error('File or buffer is undefined.');
+    }
+
+    const message = await this.processAudio(mediaData.audio, data.number);
+
+    const audioSent = await this.sendMessageWithTyping(
       data.number,
       { ...message },
       {
@@ -491,6 +493,8 @@ export class EvolutionStartupService extends ChannelStartupService {
       },
       isIntegration,
     );
+
+    return audioSent;
   }
 
   public async buttonMessage() {
@@ -543,6 +547,9 @@ export class EvolutionStartupService extends ChannelStartupService {
   }
   public async fetchProfile() {
     throw new BadRequestException('Method not available on Evolution Channel');
+  }
+  public async offerCall() {
+    throw new BadRequestException('Method not available on WhatsApp Business API');
   }
   public async sendPresence() {
     throw new BadRequestException('Method not available on Evolution Channel');

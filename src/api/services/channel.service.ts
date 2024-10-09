@@ -34,6 +34,7 @@ export class ChannelStartupService {
   public readonly localChatwoot: wa.LocalChatwoot = {};
   public readonly localProxy: wa.LocalProxy = {};
   public readonly localSettings: wa.LocalSettings = {};
+  public readonly localWebhook: wa.LocalWebHook = {};
 
   public chatwootService = new ChatwootService(
     waMonitor,
@@ -122,6 +123,17 @@ export class ChannelStartupService {
 
   public get wuid() {
     return this.instance.wuid;
+  }
+
+  public async loadWebhook() {
+    const data = await this.prismaRepository.webhook.findUnique({
+      where: {
+        instanceId: this.instanceId,
+      },
+    });
+
+    this.localWebhook.enabled = data?.enabled;
+    this.localWebhook.webhookBase64 = data?.webhookBase64;
   }
 
   public async loadSettings() {
@@ -577,6 +589,7 @@ export class ChannelStartupService {
         messageTimestamp: true,
         instanceId: true,
         source: true,
+        contextInfo: true,
         MessageUpdate: {
           select: {
             status: true,
@@ -614,9 +627,7 @@ export class ChannelStartupService {
         : this.createJid(query.where?.remoteJid)
       : null;
 
-    let result;
-    if (remoteJid) {
-      result = await this.prismaRepository.$queryRaw`
+    const result = await this.prismaRepository.$queryRaw`
             SELECT
                 "Chat"."id",
                 "Chat"."remoteJid",
@@ -625,12 +636,13 @@ export class ChannelStartupService {
                 "Chat"."createdAt",
                 "Chat"."updatedAt",
                 "Contact"."pushName",
-                "Contact"."profilePicUrl"
+                "Contact"."profilePicUrl",
+                "Contact"."unreadMessages"
             FROM "Chat"
             INNER JOIN "Message" ON "Chat"."remoteJid" = "Message"."key"->>'remoteJid'
             LEFT JOIN "Contact" ON "Chat"."remoteJid" = "Contact"."remoteJid"
             WHERE "Chat"."instanceId" = ${this.instanceId}
-            AND "Chat"."remoteJid" = ${remoteJid}
+            ${remoteJid ? 'AND "Chat"."remoteJid" = ${remoteJid}' : ''}
             GROUP BY
                 "Chat"."id",
                 "Chat"."remoteJid",
@@ -639,36 +651,10 @@ export class ChannelStartupService {
                 "Chat"."createdAt",
                 "Chat"."updatedAt",
                 "Contact"."pushName",
-                "Contact"."profilePicUrl"
+                "Contact"."profilePicUrl",
+                "Contact"."unreadMessages"
             ORDER BY "Chat"."updatedAt" DESC;
         `;
-    } else {
-      result = await this.prismaRepository.$queryRaw`
-            SELECT
-                "Chat"."id",
-                "Chat"."remoteJid",
-                "Chat"."name",
-                "Chat"."labels",
-                "Chat"."createdAt",
-                "Chat"."updatedAt",
-                "Contact"."pushName",
-                "Contact"."profilePicUrl"
-            FROM "Chat"
-            INNER JOIN "Message" ON "Chat"."remoteJid" = "Message"."key"->>'remoteJid'
-            LEFT JOIN "Contact" ON "Chat"."remoteJid" = "Contact"."remoteJid"
-            WHERE "Chat"."instanceId" = ${this.instanceId}
-            GROUP BY
-                "Chat"."id",
-                "Chat"."remoteJid",
-                "Chat"."name",
-                "Chat"."labels",
-                "Chat"."createdAt",
-                "Chat"."updatedAt",
-                "Contact"."pushName",
-                "Contact"."profilePicUrl"
-            ORDER BY "Chat"."updatedAt" DESC;
-        `;
-    }
 
     return result;
   }

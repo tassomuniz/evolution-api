@@ -1,3 +1,4 @@
+import { OfferCallDto } from '@api/dto/call.dto';
 import {
   ArchiveChatDto,
   BlockUserDto,
@@ -72,6 +73,7 @@ import { Boom } from '@hapi/boom';
 import { Instance } from '@prisma/client';
 import { makeProxyAgent } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
+import { status } from '@utils/renderStatus';
 import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
 import { AuthStateProvider } from '@utils/use-multi-file-auth-state-provider-files';
 import { useMultiFileAuthStateRedisDb } from '@utils/use-multi-file-auth-state-redis-db';
@@ -113,6 +115,7 @@ import makeWASocket, {
 } from 'baileys';
 import { Label } from 'baileys/lib/Types/Label';
 import { LabelAssociation } from 'baileys/lib/Types/LabelAssociation';
+import { spawn } from 'child_process';
 import { isBase64, isURL } from 'class-validator';
 import { randomBytes } from 'crypto';
 import EventEmitter2 from 'eventemitter2';
@@ -568,7 +571,6 @@ export class BaileysStartupService extends ChannelStartupService {
         const isGroupJid = this.localSettings.groupsIgnore && isJidGroup(jid);
         const isBroadcast = !this.localSettings.readStatus && isJidBroadcast(jid);
         const isNewsletter = isJidNewsletter(jid);
-        // const isNewsletter = jid && jid.includes('newsletter');
 
         return isGroupJid || isBroadcast || isNewsletter;
       },
@@ -596,6 +598,7 @@ export class BaileysStartupService extends ChannelStartupService {
     try {
       this.loadChatwoot();
       this.loadSettings();
+      this.loadWebhook();
       this.loadProxy();
 
       return await this.createClient(number);
@@ -625,7 +628,12 @@ export class BaileysStartupService extends ChannelStartupService {
 
       const chatsToInsert = chats
         .filter((chat) => !existingChatIdSet?.has(chat.id))
-        .map((chat) => ({ remoteJid: chat.id, instanceId: this.instanceId, name: chat.name }));
+        .map((chat) => ({
+          remoteJid: chat.id,
+          instanceId: this.instanceId,
+          name: chat.name,
+          unreadMessages: chat.unreadCount !== undefined ? chat.unreadCount : 0,
+        }));
 
       this.sendDataWebhook(Events.CHATS_UPSERT, chatsToInsert);
 
@@ -659,6 +667,7 @@ export class BaileysStartupService extends ChannelStartupService {
             instanceId: this.instanceId,
             remoteJid: chat.id,
             name: chat.name,
+            unreadMessages: typeof chat.unreadCount === 'number' ? chat.unreadCount : 0,
           },
           data: { remoteJid: chat.id },
         });
@@ -1144,18 +1153,20 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          if (isMedia && !this.configService.get<S3>('S3').ENABLE) {
-            const buffer = await downloadMediaMessage(
-              { key: received.key, message: received?.message },
-              'buffer',
-              {},
-              {
-                logger: P({ level: 'error' }) as any,
-                reuploadRequest: this.client.updateMediaMessage,
-              },
-            );
+          if (this.localWebhook.enabled) {
+            if (isMedia && this.localWebhook.webhookBase64) {
+              const buffer = await downloadMediaMessage(
+                { key: received.key, message: received?.message },
+                'buffer',
+                {},
+                {
+                  logger: P({ level: 'error' }) as any,
+                  reuploadRequest: this.client.updateMediaMessage,
+                },
+              );
 
-            messageRaw.message.base64 = buffer ? buffer.toString('base64') : undefined;
+              messageRaw.message.base64 = buffer ? buffer.toString('base64') : undefined;
+            }
           }
 
           this.logger.log(messageRaw);
@@ -1196,8 +1207,10 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-              await this.prismaRepository.contact.create({
-                data: contactRaw,
+              await this.prismaRepository.contact.upsert({
+                where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
+                create: contactRaw,
+                update: contactRaw,
               });
 
             return;
@@ -1227,14 +1240,8 @@ export class BaileysStartupService extends ChannelStartupService {
     },
 
     'messages.update': async (args: WAMessageUpdate[], settings: any) => {
-      const status: Record<number, wa.StatusMessage> = {
-        0: 'ERROR',
-        1: 'PENDING',
-        2: 'SERVER_ACK',
-        3: 'DELIVERY_ACK',
-        4: 'READ',
-        5: 'PLAYED',
-      };
+      const unreadChatToUpdate: Record<string, number> = {}; // {remoteJid: readedMessages}
+
       for await (const { key, update } of args) {
         if (settings?.groupsIgnore && key.remoteJid?.includes('@g.us')) {
           return;
@@ -1277,8 +1284,6 @@ export class BaileysStartupService extends ChannelStartupService {
             return;
           }
 
-          if (status[update.status] === 'READ' && !key.fromMe) return;
-
           if (update.message === null && update.status === undefined) {
             this.sendDataWebhook(Events.MESSAGES_DELETE, key);
 
@@ -1306,6 +1311,17 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             return;
+          } else if (update.status !== undefined && status[update.status] !== findMessage.status) {
+            if (!unreadChatToUpdate[key.remoteJid!]) {
+              unreadChatToUpdate[key.remoteJid!] = 0;
+            }
+
+            unreadChatToUpdate[key.remoteJid!]++;
+
+            this.prismaRepository.message.update({
+              where: { id: findMessage.id },
+              data: { status: status[update.status] },
+            });
           }
 
           const message: any = {
@@ -1325,6 +1341,17 @@ export class BaileysStartupService extends ChannelStartupService {
             await this.prismaRepository.messageUpdate.create({
               data: message,
             });
+        }
+      }
+
+      for await (const [remoteJid, unreadMessages] of Object.entries(unreadChatToUpdate)) {
+        const chat = await this.prismaRepository.chat.findFirst({ where: { remoteJid } });
+
+        if (chat) {
+          this.prismaRepository.chat.update({
+            where: { id: chat.id },
+            data: { unreadMessages: Math.max(0, chat.unreadMessages - unreadMessages) },
+          });
         }
       }
     },
@@ -1667,6 +1694,19 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  public async offerCall({ number, isVideo, callDuration }: OfferCallDto) {
+    const jid = this.createJid(number);
+
+    try {
+      const call = await this.client.offerCall(jid, isVideo);
+      setTimeout(() => this.client.terminateCall(call.id, call.to), callDuration * 1000);
+
+      return call;
+    } catch (error) {
+      return error;
+    }
+  }
+
   private async sendMessage(
     sender: string,
     message: any,
@@ -1677,6 +1717,8 @@ export class BaileysStartupService extends ChannelStartupService {
     ephemeralExpiration?: number,
     // participants?: GroupParticipant[],
   ) {
+    sender = sender.toLowerCase();
+
     const option: any = {
       quoted,
     };
@@ -1838,7 +1880,7 @@ export class BaileysStartupService extends ChannelStartupService {
       throw new BadRequestException(isWA);
     }
 
-    const sender = isWA.jid;
+    const sender = isWA.jid.toLowerCase();
 
     this.logger.verbose(`Sending message to ${sender}`);
 
@@ -1909,7 +1951,7 @@ export class BaileysStartupService extends ChannelStartupService {
           throw new NotFoundException('Group not found');
         }
 
-        if (options.mentionsEveryOne) {
+        if (options?.mentionsEveryOne) {
           mentions = group.participants.map((participant) => participant.id);
         } else if (options.mentioned?.length) {
           mentions = options.mentioned.map((mention) => {
@@ -1995,7 +2037,13 @@ export class BaileysStartupService extends ChannelStartupService {
 
             const mimetype = mime.getType(fileName).toString();
 
-            const fullName = join(`${this.instance.id}`, messageRaw.key.remoteJid, mediaType, fileName);
+            const fullName = join(
+              `${this.instance.id}`,
+              messageRaw.key.remoteJid,
+              `${messageRaw.key.id}`,
+              mediaType,
+              fileName,
+            );
 
             await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, {
               'Content-Type': mimetype,
@@ -2025,18 +2073,20 @@ export class BaileysStartupService extends ChannelStartupService {
         }
       }
 
-      if (isMedia && !this.configService.get<S3>('S3').ENABLE) {
-        const buffer = await downloadMediaMessage(
-          { key: messageRaw.key, message: messageRaw?.message },
-          'buffer',
-          {},
-          {
-            logger: P({ level: 'error' }) as any,
-            reuploadRequest: this.client.updateMediaMessage,
-          },
-        );
+      if (this.localWebhook.enabled) {
+        if (isMedia && this.localWebhook.webhookBase64) {
+          const buffer = await downloadMediaMessage(
+            { key: messageRaw.key, message: messageRaw?.message },
+            'buffer',
+            {},
+            {
+              logger: P({ level: 'error' }) as any,
+              reuploadRequest: this.client.updateMediaMessage,
+            },
+          );
 
-        messageRaw.message.base64 = buffer ? buffer.toString('base64') : undefined;
+          messageRaw.message.base64 = buffer ? buffer.toString('base64') : undefined;
+        }
       }
 
       this.logger.log(messageRaw);
@@ -2266,12 +2316,18 @@ export class BaileysStartupService extends ChannelStartupService {
     throw new BadRequestException('Type not found');
   }
 
-  public async statusMessage(data: SendStatusDto) {
-    const status = await this.formatStatusMessage(data);
+  public async statusMessage(data: SendStatusDto, file?: any) {
+    const mediaData: SendStatusDto = { ...data };
 
-    return await this.sendMessageWithTyping('status@broadcast', {
+    if (file) mediaData.content = file.buffer.toString('base64');
+
+    const status = await this.formatStatusMessage(mediaData);
+
+    const statusSent = await this.sendMessageWithTyping('status@broadcast', {
       status,
     });
+
+    return statusSent;
   }
 
   private async prepareMediaMessage(mediaMessage: MediaMessage) {
@@ -2395,7 +2451,11 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async mediaSticker(data: SendStickerDto) {
+  public async mediaSticker(data: SendStickerDto, file?: any) {
+    const mediaData: SendStickerDto = { ...data };
+
+    if (file) mediaData.sticker = file.buffer.toString('base64');
+
     const convert = await this.convertToWebP(data.sticker);
     const gifPlayback = data.sticker.includes('.gif');
     const result = await this.sendMessageWithTyping(
@@ -2416,10 +2476,14 @@ export class BaileysStartupService extends ChannelStartupService {
     return result;
   }
 
-  public async mediaMessage(data: SendMediaDto, isIntegration = false) {
-    const generate = await this.prepareMediaMessage(data);
+  public async mediaMessage(data: SendMediaDto, file?: any, isIntegration = false) {
+    const mediaData: SendMediaDto = { ...data };
 
-    return await this.sendMessageWithTyping(
+    if (file) mediaData.media = file.buffer.toString('base64');
+
+    const generate = await this.prepareMediaMessage(mediaData);
+
+    const mediaSent = await this.sendMessageWithTyping(
       data.number,
       { ...generate.message },
       {
@@ -2431,56 +2495,74 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       isIntegration,
     );
+
+    return mediaSent;
   }
 
   public async processAudioMp4(audio: string) {
-    let inputAudioStream: PassThrough;
+    let inputStream: PassThrough;
 
     if (isURL(audio)) {
-      const timestamp = new Date().getTime();
-      const url = `${audio}?timestamp=${timestamp}`;
-
-      const config: any = {
-        responseType: 'stream',
-      };
-
-      const response = await axios.get(url, config);
-      inputAudioStream = response.data.pipe(new PassThrough());
+      const response = await axios.get(audio, { responseType: 'stream' });
+      inputStream = response.data;
     } else {
       const audioBuffer = Buffer.from(audio, 'base64');
-      inputAudioStream = new PassThrough();
-      inputAudioStream.end(audioBuffer);
+      inputStream = new PassThrough();
+      inputStream.end(audioBuffer);
     }
 
-    return new Promise((resolve, reject) => {
-      const outputAudioStream = new PassThrough();
-      const chunks: Buffer[] = [];
+    return new Promise<Buffer>((resolve, reject) => {
+      const ffmpegProcess = spawn(ffmpegPath.path, [
+        '-i',
+        'pipe:0',
+        '-vn',
+        '-ab',
+        '128k',
+        '-ar',
+        '44100',
+        '-f',
+        'mp4',
+        '-movflags',
+        'frag_keyframe+empty_moov',
+        'pipe:1',
+      ]);
 
-      outputAudioStream.on('data', (chunk) => chunks.push(chunk));
-      outputAudioStream.on('end', () => {
-        const outputBuffer = Buffer.concat(chunks);
-        resolve(outputBuffer);
+      const outputChunks: Buffer[] = [];
+      let stderrData = '';
+
+      ffmpegProcess.stdout.on('data', (chunk) => {
+        outputChunks.push(chunk);
       });
 
-      outputAudioStream.on('error', (error) => {
-        console.log('error', error);
+      ffmpegProcess.stderr.on('data', (data) => {
+        stderrData += data.toString();
+        this.logger.verbose(`ffmpeg stderr: ${data}`);
+      });
+
+      ffmpegProcess.on('error', (error) => {
+        console.error('Error in ffmpeg process', error);
         reject(error);
       });
 
-      ffmpeg.setFfmpegPath(ffmpegPath.path);
+      ffmpegProcess.on('close', (code) => {
+        if (code === 0) {
+          this.logger.verbose('Audio converted to mp4');
+          const outputBuffer = Buffer.concat(outputChunks);
+          resolve(outputBuffer);
+        } else {
+          this.logger.error(`ffmpeg exited with code ${code}`);
+          this.logger.error(`ffmpeg stderr: ${stderrData}`);
+          reject(new Error(`ffmpeg exited with code ${code}: ${stderrData}`));
+        }
+      });
 
-      ffmpeg(inputAudioStream)
-        .outputFormat('mp4')
-        .noVideo()
-        .audioCodec('aac')
-        .audioBitrate('128k')
-        .audioFrequency(44100)
-        .addOutputOptions('-f ipod')
-        .pipe(outputAudioStream, { end: true })
-        .on('error', function (error) {
-          console.log('error', error);
-          reject(error);
-        });
+      inputStream.pipe(ffmpegProcess.stdin);
+
+      inputStream.on('error', (err) => {
+        console.error('Error in inputStream', err);
+        ffmpegProcess.stdin.end();
+        reject(err);
+      });
     });
   }
 
@@ -2534,13 +2616,22 @@ export class BaileysStartupService extends ChannelStartupService {
     });
   }
 
-  public async audioWhatsapp(data: SendAudioDto, isIntegration = false) {
+  public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
+    const mediaData: SendAudioDto = { ...data };
+
+    if (file?.buffer) {
+      mediaData.audio = file.buffer.toString('base64');
+    } else if (!isURL(data.audio) && !isBase64(data.audio)) {
+      console.error('Invalid file or audio source');
+      throw new BadRequestException('File buffer, URL, or base64 audio is required');
+    }
+
     if (!data?.encoding && data?.encoding !== false) {
       data.encoding = true;
     }
 
     if (data?.encoding) {
-      const convert = await this.processAudio(data.audio);
+      const convert = await this.processAudio(mediaData.audio);
 
       if (Buffer.isBuffer(convert)) {
         const result = this.sendMessageWithTyping<AnyMessageContent>(
@@ -2971,28 +3062,33 @@ export class BaileysStartupService extends ChannelStartupService {
       const typeMessage = getContentType(msg.message);
 
       const ext = mime.getExtension(mediaMessage?.['mimetype']);
-
       const fileName = mediaMessage?.['fileName'] || `${msg.key.id}.${ext}` || `${v4()}.${ext}`;
 
       if (convertToMp4 && typeMessage === 'audioMessage') {
-        const convert = await this.processAudioMp4(buffer.toString('base64'));
+        try {
+          const convert = await this.processAudioMp4(buffer.toString('base64'));
 
-        if (Buffer.isBuffer(convert)) {
-          const result = {
-            mediaType,
-            fileName,
-            caption: mediaMessage['caption'],
-            size: {
-              fileLength: mediaMessage['fileLength'],
-              height: mediaMessage['height'],
-              width: mediaMessage['width'],
-            },
-            mimetype: 'audio/mp4',
-            base64: convert,
-            buffer: getBuffer ? convert : null,
-          };
+          if (Buffer.isBuffer(convert)) {
+            const result = {
+              mediaType,
+              fileName,
+              caption: mediaMessage['caption'],
+              size: {
+                fileLength: mediaMessage['fileLength'],
+                height: mediaMessage['height'],
+                width: mediaMessage['width'],
+              },
+              mimetype: 'audio/mp4',
+              base64: convert.toString('base64'),
+              buffer: getBuffer ? convert : null,
+            };
 
-          return result;
+            return result;
+          }
+        } catch (error) {
+          this.logger.error('Error converting audio to mp4:');
+          this.logger.error(error);
+          throw new BadRequestException('Failed to convert audio to MP4');
         }
       }
 
@@ -3010,6 +3106,7 @@ export class BaileysStartupService extends ChannelStartupService {
         buffer: getBuffer ? buffer : null,
       };
     } catch (error) {
+      this.logger.error('Error processing media message:');
       this.logger.error(error);
       throw new BadRequestException(error.toString());
     }
@@ -3288,10 +3385,10 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  private async getGroupMetadataCache(groupJid: string) {
+  private getGroupMetadataCache = async (groupJid: string) => {
     if (!isJidGroup(groupJid)) return null;
 
-    const cacheConf = configService.get<CacheConf>('CACHE');
+    const cacheConf = this.configService.get<CacheConf>('CACHE');
 
     if ((cacheConf?.REDIS?.ENABLED && cacheConf?.REDIS?.URI !== '') || cacheConf?.LOCAL?.ENABLED) {
       if (await groupMetadataCache?.has(groupJid)) {
@@ -3310,7 +3407,7 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     return await this.findGroup({ groupJid }, 'inner');
-  }
+  };
 
   public async createGroup(create: CreateGroupDto) {
     try {
@@ -3607,7 +3704,7 @@ export class BaileysStartupService extends ChannelStartupService {
     const messageRaw = {
       key: message.key,
       pushName: message.pushName,
-      status: message.status,
+      status: status[message.status],
       message: { ...message.message },
       contextInfo: contentMsg?.contextInfo,
       messageType: contentType || 'unknown',

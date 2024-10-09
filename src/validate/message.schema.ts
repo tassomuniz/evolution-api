@@ -54,6 +54,17 @@ const quotedOptionsSchema: JSONSchema7 = {
   },
 };
 
+export const offerCallSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    number: { ...numberDefinition },
+    isVideo: { type: 'boolean', enum: [true, false] },
+    callDuration: { type: 'integer', minimum: 1, maximum: 15 },
+  },
+  required: ['number', 'callDuration'],
+};
+
 export const textMessageSchema: JSONSchema7 = {
   $id: v4(),
   type: 'object',
@@ -108,7 +119,7 @@ export const mediaMessageSchema: JSONSchema7 = {
       },
     },
   },
-  required: ['number', 'mediatype', 'media'],
+  required: ['number', 'mediatype'],
 };
 
 export const audioMessageSchema: JSONSchema7 = {
@@ -134,7 +145,7 @@ export const audioMessageSchema: JSONSchema7 = {
       },
     },
   },
-  required: ['number', 'audio'],
+  required: ['number'],
 };
 
 export const statusMessageSchema: JSONSchema7 = {
@@ -158,7 +169,7 @@ export const statusMessageSchema: JSONSchema7 = {
     },
     allContacts: { type: 'boolean', enum: [true, false] },
   },
-  required: ['type', 'content'],
+  required: ['type'],
 };
 
 export const stickerMessageSchema: JSONSchema7 = {
@@ -184,7 +195,7 @@ export const stickerMessageSchema: JSONSchema7 = {
       },
     },
   },
-  required: ['number', 'sticker'],
+  required: ['number'],
 };
 
 export const locationMessageSchema: JSONSchema7 = {
