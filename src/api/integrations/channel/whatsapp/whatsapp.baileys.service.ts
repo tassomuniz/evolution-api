@@ -3040,7 +3040,49 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async deleteMessage(del: DeleteMessage) {
     try {
-      return await this.client.sendMessage(del.remoteJid, { delete: del });
+      const response = await this.client.sendMessage(del.remoteJid, { delete: del });
+      if (response) {
+        const messageId = response.message?.protocolMessage?.key?.id;
+        if (messageId) {
+          const isLogicalDeleted = configService.get<Database>('DATABASE').DELETE_DATA.LOGICAL_MESSAGE_DELETE;
+          let message = await this.prismaRepository.message.findUnique({
+            where: { id: messageId },
+          });
+          if (isLogicalDeleted) {
+            if (!message) return response;
+            const existingKey = typeof message?.key === 'object' && message.key !== null ? message.key : {};
+            message = await this.prismaRepository.message.update({
+              where: { id: messageId },
+              data: {
+                key: {
+                  ...existingKey,
+                  deleted: true,
+                },
+              },
+            });
+          } else {
+            await this.prismaRepository.message.deleteMany({
+              where: {
+                id: messageId,
+              },
+            });
+          }
+          this.sendDataWebhook(Events.MESSAGES_DELETE, {
+            id: message.id,
+            instanceId: message.instanceId,
+            key: message.key,
+            messageType: message.messageType,
+            status: message.status,
+            source: message.source,
+            messageTimestamp: message.messageTimestamp,
+            pushName: message.pushName,
+            participant: message.participant,
+            message: message.message,
+          });
+        }
+      }
+
+      return response;
     } catch (error) {
       throw new InternalServerErrorException('Error while deleting message for everyone', error?.toString());
     }
@@ -3552,6 +3594,9 @@ export class BaileysStartupService extends ChannelStartupService {
         restrict: group.restrict,
         announce: group.announce,
         participants: group.participants,
+        isCommunity: group.isCommunity,
+        isCommunityAnnounce: group.isCommunityAnnounce,
+        linkedParent: group.linkedParent,
       };
     } catch (error) {
       if (reply === 'inner') {
@@ -3581,6 +3626,9 @@ export class BaileysStartupService extends ChannelStartupService {
         descId: group.descId,
         restrict: group.restrict,
         announce: group.announce,
+        isCommunity: group.isCommunity,
+        isCommunityAnnounce: group.isCommunityAnnounce,
+        linkedParent: group.linkedParent,
       };
 
       if (getParticipants.getParticipants == 'true') {
