@@ -7,9 +7,10 @@ services:
       - evolution-net
     container_name: redis
     command: >
-      redis-server --port 6379 --appendonly yes
+      redis-server /usr/local/etc/redis/redis.conf
     volumes:
       - evolution_redis:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
     ports:
       - 6379:6379
 

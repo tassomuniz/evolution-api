@@ -504,6 +504,278 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  /**
+   * Trata erros de PreKey específicos para uma mensagem
+   * @param received - Mensagem que causou o erro
+   */
+  private async handlePreKeyError(received: proto.IWebMessageInfo) {
+    try {
+      const remoteJid = received.key.remoteJid;
+      this.logger.warn(`PreKey/Session error detected for ${remoteJid}, attempting subtle recovery...`);
+      
+      // Primeiro tenta limpar a sessão
+      await this.clearContactSession(remoteJid);
+      
+      // Depois tenta forçar handshake de forma sutil
+      await this.forceHandshakeWithContact(remoteJid);
+      
+    } catch (error) {
+      this.logger.error(`Error handling PreKey/Session error: ${error?.message}`);
+    }
+  }
+
+  /**
+   * Trata erros de PreKey em nível de catch
+   * @param error - Erro capturado
+   */
+  private async handlePreKeyErrorRecovery(error: any) {
+    try {
+      this.logger.warn(`PreKey recovery initiated due to error: ${error?.message}`);
+      
+      // Tenta recriar as chaves de sessão
+      if (this.client && this.client.authState) {
+        this.logger.info('Attempting to refresh auth state...');
+        
+        // Força uma nova sincronização de pre-keys
+        await this.requestNewPreKeys();
+      }
+      
+    } catch (recoveryError) {
+      this.logger.error(`Error during PreKey recovery: ${recoveryError?.message}`);
+    }
+  }
+
+  /**
+   * Força um novo handshake com um contato usando métodos sutis
+   * @param remoteJid - ID do contato
+   */
+  private async forceHandshakeWithContact(remoteJid: string) {
+    try {
+      if (!this.client || !remoteJid) return;
+      
+      this.logger.info(`Forcing handshake with contact: ${remoteJid}`);
+      
+      // Método 1: Tentar ping silencioso
+      try {
+        const pingSuccess = await this.silentPingContact(remoteJid);
+        if (pingSuccess) {
+          this.logger.info(`Handshake completed via silent ping for ${remoteJid}`);
+          return; // Se funcionou, não precisa continuar
+        }
+      } catch (pingError) {
+        this.logger.warn(`Silent ping handshake failed for ${remoteJid}: ${pingError?.message}`);
+      }
+      
+      // Método 2: Tentar enviar presença/typing para forçar handshake
+      try {
+        await this.client.sendPresenceUpdate('composing', remoteJid);
+        await new Promise(resolve => setTimeout(resolve, 100)); // Aguarda 100ms
+        await this.client.sendPresenceUpdate('paused', remoteJid);
+        this.logger.info(`Handshake attempted via presence for ${remoteJid}`);
+        return; // Se funcionou, não precisa enviar mensagem
+      } catch (presenceError) {
+        this.logger.warn(`Presence handshake failed for ${remoteJid}: ${presenceError?.message}`);
+      }
+      
+      // Método 3: Tentar marcar mensagem como lida (se existir mensagem anterior)
+      try {
+        const lastMessage = await this.getLastMessage(remoteJid);
+        if (lastMessage && !lastMessage.key.fromMe) {
+          await this.client.readMessages([lastMessage.key]);
+          this.logger.info(`Handshake attempted via read receipt for ${remoteJid}`);
+          return; // Se funcionou, não precisa enviar mensagem
+        }
+      } catch (readError) {
+        this.logger.warn(`Read receipt handshake failed for ${remoteJid}: ${readError?.message}`);
+      }
+      
+      // Método 4: Tentar fetch do status do contato
+      try {
+        await this.client.fetchStatus(remoteJid);
+        this.logger.info(`Handshake attempted via status fetch for ${remoteJid}`);
+        return; // Se funcionou, não precisa enviar mensagem
+      } catch (statusError) {
+        this.logger.warn(`Status fetch handshake failed for ${remoteJid}: ${statusError?.message}`);
+      }
+      
+      // Método 5: Como último recurso, envia mensagem muito sutil
+      try {
+        this.logger.warn(`Using subtle message method as last resort for ${remoteJid}`);
+        
+        // Usa apenas um espaço em branco - quase invisível
+        const sentMessage = await this.client.sendMessage(remoteJid, { 
+          text: ' ' // Apenas um espaço - bem mais sutil que qualquer emoji
+        });
+        
+        // Tenta deletar a mensagem rapidamente
+        try {
+          await new Promise(resolve => setTimeout(resolve, 300)); // Aguarda apenas 300ms
+          await this.client.sendMessage(remoteJid, {
+            delete: sentMessage.key
+          });
+          this.logger.info(`Subtle sync message sent and deleted for ${remoteJid}`);
+        } catch (deleteError) {
+          // Se não conseguir deletar, pelo menos a mensagem é só um espaço
+          this.logger.warn(`Could not delete sync message for ${remoteJid}, but message is just a space: ${deleteError?.message}`);
+        }
+        
+      } catch (messageError) {
+        this.logger.error(`All handshake methods failed for ${remoteJid}: ${messageError?.message}`);
+      }
+      
+    } catch (error) {
+      this.logger.error(`Error forcing handshake with ${remoteJid}: ${error?.message}`);
+    }
+  }
+
+  /**
+   * Limpa a sessão de um contato específico
+   * @param remoteJid - ID do contato
+   */
+  private async clearContactSession(remoteJid: string) {
+    try {
+      if (!remoteJid) return;
+      
+      this.logger.info(`Clearing session for contact: ${remoteJid}`);
+      
+      // Limpa do cache se estiver usando Redis
+      const sessionKey = `session:${remoteJid}`;
+      try {
+        await this.cache.delete(sessionKey);
+      } catch (error) {
+        // Se não tiver método delete, tenta set com null
+        await this.cache.set(sessionKey, null, 1);
+      }
+      
+      // Limpa do cache do Baileys também
+      try {
+        await this.baileysCache.delete(`${this.instanceId}_${remoteJid}`);
+      } catch (error) {
+        // Se não tiver método delete, tenta set com null
+        await this.baileysCache.set(`${this.instanceId}_${remoteJid}`, null, 1);
+      }
+      
+      this.logger.info(`Session cleared for ${remoteJid}`);
+      
+    } catch (error) {
+      this.logger.error(`Error clearing session for ${remoteJid}: ${error?.message}`);
+    }
+  }
+
+  /**
+   * Solicita novos pre-keys do servidor WhatsApp
+   */
+  private async requestNewPreKeys(): Promise<void> {
+    try {
+      if (!this.client) return;
+      
+      this.logger.info('Requesting new pre-keys from WhatsApp server...');
+      
+      // Método 1: Tentar usar métodos internos do Baileys para forçar sincronização
+      try {
+        if (this.client.authState && this.client.authState.keys) {
+          // Solicita novos pre-keys sem limpar os existentes
+          await this.client.requestPairingCode?.('');
+        }
+      } catch (error) {
+        this.logger.warn(`Internal pre-key request failed: ${error?.message}`);
+      }
+      
+      // Método 2: Tentar forçar uma sincronização de dispositivos
+      try {
+        const myJid = this.client.user?.id;
+        if (myJid) {
+          await this.client.sendPresenceUpdate('available');
+          this.logger.info('Forced presence update to refresh pre-keys');
+        }
+      } catch (error) {
+        this.logger.warn(`Presence update failed: ${error?.message}`);
+      }
+      
+      this.logger.info('Pre-keys refresh completed');
+      
+    } catch (error) {
+      this.logger.error(`Error requesting new pre-keys: ${error?.message}`);
+    }
+  }
+
+  /**
+   * Tenta fazer um "ping" silencioso para um contato específico
+   * @param remoteJid - ID do contato
+   */
+  private async silentPingContact(remoteJid: string): Promise<boolean> {
+    try {
+      if (!this.client || !remoteJid) return false;
+      
+      this.logger.info(`Attempting silent ping to ${remoteJid}`);
+      
+      // Método 1: Tentar buscar chaves do contato
+      try {
+        await this.client.assertSessions([remoteJid], false);
+        this.logger.info(`Session assertion completed for ${remoteJid}`);
+        return true;
+      } catch (error) {
+        this.logger.warn(`Session assertion failed for ${remoteJid}: ${error?.message}`);
+      }
+      
+      // Método 2: Tentar buscar devices do contato
+      try {
+        await this.client.query({
+          tag: 'iq',
+          attrs: { type: 'get', to: remoteJid },
+          content: [{ tag: 'ping', attrs: {} }]
+        });
+        this.logger.info(`Silent ping completed for ${remoteJid}`);
+        return true;
+      } catch (error) {
+        this.logger.warn(`Silent ping failed for ${remoteJid}: ${error?.message}`);
+      }
+      
+      return false;
+      
+    } catch (error) {
+      this.logger.error(`Error in silent ping to ${remoteJid}: ${error?.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Verifica se uma mensagem contém conteúdo de mídia válido
+   * @param message - Mensagem a ser verificada
+   * @returns boolean
+   */
+  protected hasValidMediaContent(message: any): boolean {
+    try {
+      if (!message || !message.message) return false;
+      
+      const mediaTypes = [
+        'imageMessage',
+        'videoMessage',
+        'audioMessage',
+        'documentMessage',
+        'stickerMessage',
+        'ptvMessage',
+        'documentWithCaptionMessage'
+      ];
+      
+      for (const mediaType of mediaTypes) {
+        if (message.message[mediaType]) {
+          const mediaContent = message.message[mediaType];
+          
+          // Verifica se tem URL ou dados válidos
+          if (mediaContent.url || mediaContent.directPath || mediaContent.mediaKey) {
+            return true;
+          }
+        }
+      }
+      
+      return false;
+    } catch (error) {
+      this.logger.error(`Error checking media content: ${error?.message}`);
+      return false;
+    }
+  }
+
   private async defineAuthState() {
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
@@ -557,6 +829,9 @@ export class BaileysStartupService extends ChannelStartupService {
     this.logger.info(log);
 
     this.logger.info(`Group Ignore: ${this.localSettings.groupsIgnore}`);
+    this.logger.info(`Sync Full History: ${this.localSettings.syncFullHistory}`);
+    this.logger.info(`PreKey/Session Error Handling: ENABLED (Subtle Recovery)`);
+    this.logger.info(`Recovery Methods: Silent Ping → Presence → Read Receipt → Status Fetch → Space Message (Last Resort)`);
 
     let options;
 
@@ -615,6 +890,11 @@ export class BaileysStartupService extends ChannelStartupService {
       keepAliveIntervalMs: 30_000,
       qrTimeout: 45_000,
       emitOwnEvents: false,
+      // Configurações específicas para melhorar robustez contra PreKey errors
+      syncFullHistory: this.localSettings.syncFullHistory,
+      defaultQueryTimeoutMs: 60_000,
+      // Configurações para melhor handling de pre-keys
+      mobile: false, // Força modo MD padrão
       shouldIgnoreJid: (jid) => {
         if (this.localSettings.syncFullHistory && isJidGroup(jid)) {
           return false;
@@ -626,7 +906,6 @@ export class BaileysStartupService extends ChannelStartupService {
 
         return isGroupJid || isBroadcast || isNewsletter;
       },
-      syncFullHistory: this.localSettings.syncFullHistory,
       shouldSyncHistoryMessage: (msg: proto.Message.IHistorySyncNotification) => {
         return this.historySyncNotification(msg);
       },
@@ -685,6 +964,18 @@ export class BaileysStartupService extends ChannelStartupService {
       this.loadSettings();
       this.loadWebhook();
       this.loadProxy();
+
+      // Adiciona log para depuração de atualização de credenciais
+      if (this.client && this.client.ev) {
+        this.client.ev.on('creds.update', async (creds) => {
+          try {
+            this.logger.info('[DEBUG] Credenciais atualizadas (creds.update)');
+            // Você pode adicionar mais detalhes do objeto creds se quiser
+          } catch (err) {
+            this.logger.error(`[DEBUG] Erro ao processar creds.update: ${err?.message}`);
+          }
+        });
+      }
 
       return await this.createClient(number);
     } catch (error) {
@@ -1038,12 +1329,33 @@ export class BaileysStartupService extends ChannelStartupService {
         for (const received of messages) {
           if (
             received?.messageStubParameters?.some?.((param) =>
-              ['No matching sessions found for message', 'Bad MAC', 'failed to decrypt message', 'SessionError'].some(
-                (err) => param?.includes?.(err),
-              ),
+              [
+                'No matching sessions found for message', 
+                'Bad MAC', 
+                'failed to decrypt message', 
+                'SessionError',
+                'No session record',
+                'Invalid PreKey ID',
+                'PreKeyError',
+                'failed to decrypt',
+                'CIPHERTEXT_MESSAGE'
+              ].some((err) => param?.includes?.(err)),
             )
           ) {
             this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
+            
+            // Tratamento específico para PreKey/Session errors
+            const hasPreKeyError = received?.messageStubParameters?.some?.((param) =>
+              param?.includes?.('Invalid PreKey ID') || 
+              param?.includes?.('PreKeyError') || 
+              param?.includes?.('SessionError') || 
+              param?.includes?.('No session record')
+            );
+            
+            if (hasPreKeyError) {
+              this.handlePreKeyError(received);
+            }
+            
             continue;
           }
           if (received.message?.conversation || received.message?.extendedTextMessage?.text) {
@@ -1371,6 +1683,17 @@ export class BaileysStartupService extends ChannelStartupService {
           }
         }
       } catch (error) {
+        this.logger.error(`Error in messages.upsert handler: ${error?.message}`);
+        
+        // Tratamento específico para PreKey/Session errors
+        if (error?.message?.includes?.('Invalid PreKey ID') || 
+            error?.message?.includes?.('PreKeyError') ||
+            error?.message?.includes?.('SessionError') ||
+            error?.message?.includes?.('No session record')) {
+          this.logger.warn('PreKey/Session error detected, attempting to recover...');
+          await this.handlePreKeyErrorRecovery(error);
+        }
+        
         this.logger.error(error);
       }
     },

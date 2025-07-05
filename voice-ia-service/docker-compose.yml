@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  voice-ia-service:
+    build: .
+    container_name: voice-ia-service
+    ports:
+      - "4000:4000"
+    networks:
+      - evolution-net
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    restart: always
+
+networks:
+  evolution-net:
+    external: true
+
+

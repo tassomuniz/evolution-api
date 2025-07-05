@@ -13,7 +13,7 @@ COPY ./package*.json ./
 COPY ./tsconfig.json ./
 COPY ./tsup.config.ts ./
 
-RUN npm ci --silent
+RUN npm install --silent
 
 COPY ./src ./src
 COPY ./public ./public
@@ -28,6 +28,7 @@ RUN chmod +x ./Docker/scripts/* && dos2unix ./Docker/scripts/*
 
 RUN ./Docker/scripts/generate_database.sh
 
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
 FROM node:20-alpine AS final

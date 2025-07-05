@@ -13,10 +13,21 @@ export const useVoiceCallsBaileys = async (
 ) => {
   baileys_connection_state = status ?? 'close';
 
-  const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io('https://devices.wavoip.com/baileys', {
-    transports: ['websocket'],
-    path: `/${wavoip_token}/websocket`,
-  });
+  // Se o token for da instância "com1", conecta ao nosso serviço local
+  const isLocalAiService = wavoip_token === '199cb6cd-b044-4e06-8eda-fc4158355899';
+  
+  if (logger) {
+    console.log(`[*] Conectando ao ${isLocalAiService ? 'Voice-IA Service local' : 'WaVoIP oficial'}`);
+  }
+
+  const socket: Socket<ServerToClientEvents, ClientToServerEvents> = isLocalAiService
+    ? io('http://voice-ia-service:4000/baileys', {
+        transports: ['websocket'],
+      })
+    : io(`https://devices.wavoip.com/baileys`, {
+        transports: ['websocket'],
+        path: `/${wavoip_token}/websocket`,
+      });
 
   socket.on('connect', () => {
     if (logger) console.log('[*] - Wavoip connected', socket.id);
